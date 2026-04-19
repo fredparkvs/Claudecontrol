@@ -3,7 +3,7 @@
 # Requires: bash 3.2+ or zsh, python3 or jq, jig (optional), claude CLI
 set -euo pipefail
 export LANG=en_US.UTF-8
-LC_ALL=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_PATH="$SCRIPT_DIR/projects.json"
@@ -12,7 +12,7 @@ MAX_DEPTH=4
 CLAUDE_PROJECTS_DIR="$HOME/.claude/projects"
 
 # ---------------------------------------------------------------------------
-# Colors
+# Colors & pre-computed UI strings
 # ---------------------------------------------------------------------------
 c_reset='\033[0m'
 c_cyan='\033[36m'
@@ -24,13 +24,18 @@ c_dark_gray='\033[90m'
 c_dark_cyan='\033[96m'
 c_red='\033[31m'
 
-cecho() { local color="$1"; shift; printf "${color}%s${c_reset}\n" "$*"; }
+# Pre-computed so write_banner/write_divider spawn no subshells at render time
+_BANNER_H="$(printf '═%.0s' {1..44})"
+_DIV_H="$(printf '─%.0s' {1..46})"
+
+cecho()  { local color="$1"; shift; printf "${color}%s${c_reset}\n" "$*"; }
 cnecho() { local color="$1"; shift; printf "${color}%s${c_reset}" "$*"; }
 
 # ---------------------------------------------------------------------------
-# JSON helper — jq preferred, python3 fallback
+# JSON helpers — jq preferred, python3 fallback
 # ---------------------------------------------------------------------------
 _json_tool=""
+
 _detect_json_tool() {
     if command -v jq &>/dev/null; then _json_tool="jq"
     elif command -v python3 &>/dev/null; then _json_tool="python3"
@@ -40,8 +45,6 @@ _detect_json_tool() {
     fi
 }
 
-# Read a top-level string field from a JSON file
-# Usage: json_get_field <file> <field>
 json_get_field() {
     local file="$1" field="$2"
     if [[ "$_json_tool" == "jq" ]]; then
@@ -58,7 +61,6 @@ except: pass
     fi
 }
 
-# Read a JSON array from file, output one compact JSON object per line
 json_array_lines() {
     local file="$1"
     if [[ "$_json_tool" == "jq" ]]; then
@@ -75,25 +77,8 @@ except: pass
     fi
 }
 
-# Get field from a single JSON object string (not a file)
-json_obj_field() {
-    local obj="$1" field="$2"
-    if [[ "$_json_tool" == "jq" ]]; then
-        printf '%s' "$obj" | jq -r ".$field // empty" 2>/dev/null
-    else
-        python3 -c "
-import json,sys
-try:
-    d=json.loads('''$obj''')
-    v=d.get('$field','')
-    print(v if v else '',end='')
-except: pass
-" 2>/dev/null
-    fi
-}
-
 # ---------------------------------------------------------------------------
-# App config (config.json — stores scanRoot)
+# App config (config.json)
 # ---------------------------------------------------------------------------
 SCAN_ROOT=""
 
@@ -101,22 +86,17 @@ load_app_config() {
     if [[ -f "$APP_CONFIG_PATH" ]]; then
         local root
         root="$(json_get_field "$APP_CONFIG_PATH" "scanRoot")"
-        if [[ -n "$root" ]]; then
-            SCAN_ROOT="$root"
-            return 0
-        fi
+        if [[ -n "$root" ]]; then SCAN_ROOT="$root"; return 0; fi
     fi
 
-    # First run
     echo ""
-    cecho "$c_cyan" "  Welcome to Mission Centre!"
+    cecho "$c_cyan"      "  Welcome to Mission Centre!"
     cecho "$c_dark_gray" "  Enter the root folder to scan for AI projects."
     cecho "$c_dark_gray" "  Example: /Users/you/AI  or  ~/Dev/Projects"
     echo ""
     printf "  Scan root: "
     read -r root
     [[ -z "$root" ]] && root="$SCRIPT_DIR"
-    # Expand ~ manually
     root="${root/#\~/$HOME}"
 
     printf '{"scanRoot":"%s"}\n' "$root" > "$APP_CONFIG_PATH"
@@ -129,36 +109,27 @@ load_app_config() {
 # Project discovery
 # ---------------------------------------------------------------------------
 SKIP_DIRS=( node_modules .git dist build bin obj out .next .nuxt venv .venv __pycache__ .cache Archive Models Resources resources "Design Inspiration" "Company Registration" Finance Investors Exit )
-
 DEFINITIVE_MARKERS=( .git package.json requirements.txt Cargo.toml go.mod pom.xml pyproject.toml )
 SUGGESTIVE_MARKERS=( CLAUDE.md README.md README app.js main.py index.js main.ts index.ts )
 
 should_skip_dir() {
-    local name="$1"
-    local d
-    for d in "${SKIP_DIRS[@]}"; do
-        [[ "$name" == "$d" ]] && return 0
-    done
+    local name="$1" d
+    for d in "${SKIP_DIRS[@]}"; do [[ "$name" == "$d" ]] && return 0; done
     return 1
 }
 
+dir_has_jig_file() { ls "$1/"*.jig &>/dev/null 2>&1; }
+
 dir_has_definitive_marker() {
     local dir="$1" m
-    for m in "${DEFINITIVE_MARKERS[@]}"; do
-        [[ -e "$dir/$m" ]] && return 0
-    done
-    # Also check *.jig glob
-    ls "$dir/"*.jig &>/dev/null 2>&1 && return 0
-    return 1
+    for m in "${DEFINITIVE_MARKERS[@]}"; do [[ -e "$dir/$m" ]] && return 0; done
+    dir_has_jig_file "$dir"
 }
 
 dir_has_suggestive_marker() {
     local dir="$1" m
-    for m in "${SUGGESTIVE_MARKERS[@]}"; do
-        [[ -e "$dir/$m" ]] && return 0
-    done
-    ls "$dir/"*.jig &>/dev/null 2>&1 && return 0
-    return 1
+    for m in "${SUGGESTIVE_MARKERS[@]}"; do [[ -e "$dir/$m" ]] && return 0; done
+    dir_has_jig_file "$dir"
 }
 
 dir_has_any_marker() {
@@ -168,18 +139,16 @@ dir_has_any_marker() {
 }
 
 any_child_has_markers() {
-    local dir="$1" child
+    local dir="$1" child name
     for child in "$dir"/*/; do
         [[ -d "$child" ]] || continue
-        local name="${child%/}"
-        name="${name##*/}"
+        name="${child%/}"; name="${name##*/}"
         should_skip_dir "$name" && continue
         dir_has_any_marker "$child" && return 0
     done
     return 1
 }
 
-# Outputs discovered project paths, one per line
 find_project_dirs() {
     local path="$1" depth="$2"
     (( depth > MAX_DEPTH )) && return
@@ -190,16 +159,14 @@ find_project_dirs() {
     [[ "$path" == "$SCRIPT_DIR" ]] && return
 
     if dir_has_definitive_marker "$path"; then
-        echo "$path"
-        return
+        echo "$path"; return
     fi
 
     if dir_has_suggestive_marker "$path"; then
         if any_child_has_markers "$path"; then
-            : # container — fall through to recurse
+            : # container — recurse into children
         else
-            echo "$path"
-            return
+            echo "$path"; return
         fi
     fi
 
@@ -213,8 +180,6 @@ find_project_dirs() {
 # ---------------------------------------------------------------------------
 # Projects config (projects.json)
 # ---------------------------------------------------------------------------
-
-# Arrays parallel-indexed: PROJ_PATH, PROJ_NAME, PROJ_DESC, PROJ_PROFILE
 PROJ_PATHS=()
 PROJ_NAMES=()
 PROJ_DESCS=()
@@ -224,20 +189,19 @@ load_config() {
     PROJ_PATHS=(); PROJ_NAMES=(); PROJ_DESCS=(); PROJ_PROFILES=()
     [[ -f "$CONFIG_PATH" ]] || return
 
-    local line path name desc profile
+    local line fields path name desc profile
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
+        # Parse all 4 fields in a single subprocess call
         if [[ "$_json_tool" == "jq" ]]; then
-            path="$(printf '%s' "$line" | jq -r '.path // empty')"
-            name="$(printf '%s' "$line" | jq -r '.name // empty')"
-            desc="$(printf '%s' "$line" | jq -r '.description // empty')"
-            profile="$(printf '%s' "$line" | jq -r '.profile // "standard"')"
+            fields="$(printf '%s' "$line" | jq -r '[.path // empty, .name // empty, .description // empty, .profile // "standard"] | @tsv')"
         else
-            path="$(printf '%s' "$line" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('path',''))")"
-            name="$(printf '%s' "$line" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('name',''))")"
-            desc="$(printf '%s' "$line" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('description',''))")"
-            profile="$(printf '%s' "$line" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('profile','standard'))")"
+            fields="$(printf '%s' "$line" | python3 -c "
+import json,sys
+d=json.loads(sys.stdin.read())
+print('\t'.join([d.get('path',''), d.get('name',''), d.get('description',''), d.get('profile','standard')]))")"
         fi
+        IFS=$'\t' read -r path name desc profile <<< "$fields"
         [[ -z "$path" ]] && continue
         PROJ_PATHS+=("$path")
         PROJ_NAMES+=("$name")
@@ -247,26 +211,25 @@ load_config() {
 }
 
 save_config() {
-    local i out="["
-    local count=${#PROJ_PATHS[@]}
+    local i count=${#PROJ_PATHS[@]}
+    local today; today="$(date +%Y-%m-%d)"
+    local out="["
     for (( i=0; i<count; i++ )); do
         [[ $i -gt 0 ]] && out+=","
-        local today; today="$(date +%Y-%m-%d)"
         if [[ "$_json_tool" == "jq" ]]; then
-            local entry
-            entry="$(jq -n \
-                --arg path "${PROJ_PATHS[$i]}" \
-                --arg name "${PROJ_NAMES[$i]}" \
-                --arg desc "${PROJ_DESCS[$i]}" \
-                --arg prof "${PROJ_PROFILES[$i]}" \
-                --arg added "$today" \
+            out+="$(jq -n \
+                --arg path    "${PROJ_PATHS[$i]}" \
+                --arg name    "${PROJ_NAMES[$i]}" \
+                --arg desc    "${PROJ_DESCS[$i]}" \
+                --arg prof    "${PROJ_PROFILES[$i]}" \
+                --arg added   "$today" \
                 '{path:$path,name:$name,description:$desc,added:$added,profile:$prof}')"
-            out+="$entry"
         else
-            out+="$(python3 -c "
-import json
-print(json.dumps({'path':'${PROJ_PATHS[$i]//\'/\\\'}','name':'${PROJ_NAMES[$i]//\'/\\\'}','description':'${PROJ_DESCS[$i]//\'/\\\'}','added':'$today','profile':'${PROJ_PROFILES[$i]//\'/\\\'}'}),end='')
-")"
+            # Pass values via environment to avoid any quoting/injection issues
+            out+="$(MC_PATH="${PROJ_PATHS[$i]}" MC_NAME="${PROJ_NAMES[$i]}" MC_DESC="${PROJ_DESCS[$i]}" MC_PROF="${PROJ_PROFILES[$i]}" MC_DATE="$today" \
+                python3 -c "
+import json,os
+print(json.dumps({'path':os.environ['MC_PATH'],'name':os.environ['MC_NAME'],'description':os.environ['MC_DESC'],'added':os.environ['MC_DATE'],'profile':os.environ['MC_PROF']}),end='')")"
         fi
     done
     out+="]"
@@ -285,9 +248,7 @@ sync_new_projects() {
     cecho "$c_dark_gray" "Scanning $SCAN_ROOT for projects ..."
 
     local discovered=()
-    while IFS= read -r p; do
-        discovered+=("$p")
-    done < <(find_project_dirs "$SCAN_ROOT" 0)
+    while IFS= read -r p; do discovered+=("$p"); done < <(find_project_dirs "$SCAN_ROOT" 0)
 
     local new_paths=()
     local p
@@ -302,8 +263,9 @@ sync_new_projects() {
 
     echo ""
     cecho "$c_yellow" "Found ${#new_paths[@]} new project(s) not yet in config."
-    printf '\033[90m%s\033[0m\n' "$(printf '%0.s─' {1..46})"
+    write_divider
 
+    local name desc prof
     for p in "${new_paths[@]}"; do
         local default_name="${p##*/}"
         echo ""
@@ -332,74 +294,9 @@ sync_new_projects() {
 # ---------------------------------------------------------------------------
 
 # Claude encodes paths: /Users/fred/AI/Foo Bar → -Users-fred-AI-Foo-Bar
-encode_path() {
-    printf '%s' "$1" | sed 's|[/ ]|-|g'
-}
-
-# Parse up to 150 lines of a .jsonl session file
-# Outputs the best label: custom-title preferred, then first user message
-get_session_label() {
-    local file="$1"
-    [[ -f "$file" ]] || return
-
-    python3 - "$file" <<'PYEOF'
-import json, sys
-
-path = sys.argv[1]
-custom_title = None
-first_prompt = None
-
-try:
-    with open(path, 'r', encoding='utf-8', errors='replace') as f:
-        for i, line in enumerate(f):
-            if i >= 150:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except Exception:
-                continue
-
-            if not custom_title and msg.get('type') == 'custom-title' and msg.get('customTitle'):
-                custom_title = msg['customTitle'].replace('-', ' ')
-
-            if not first_prompt:
-                # Format A: {"type":"user","message":{"content":...}}
-                if msg.get('type') in ('user', 'human') and isinstance(msg.get('message'), dict):
-                    c = msg['message'].get('content', '')
-                    if isinstance(c, list):
-                        for b in c:
-                            if isinstance(b, dict) and b.get('type') == 'text' and b.get('text'):
-                                first_prompt = str(b['text'])
-                                break
-                    elif c:
-                        first_prompt = str(c)
-                # Format C: {"role":"user","content":...}
-                if not first_prompt and msg.get('role') == 'user' and msg.get('content'):
-                    c = msg['content']
-                    if isinstance(c, list):
-                        for b in c:
-                            if isinstance(b, dict) and b.get('type') == 'text' and b.get('text'):
-                                first_prompt = str(b['text'])
-                                break
-                    elif isinstance(c, str):
-                        first_prompt = c
-
-            if custom_title and first_prompt:
-                break
-except Exception:
-    pass
-
-result = custom_title if custom_title else first_prompt
-if result:
-    print(result, end='')
-PYEOF
-}
+encode_path() { printf '%s' "$1" | sed 's|[/ ]|-|g'; }
 
 # Outputs sessions as tab-separated lines: sessionId\tfileMtime\tlabel
-# Usage: get_recent_sessions <project_path> [max_count]
 get_recent_sessions() {
     local project_path="$1" max_count="${2:-5}"
     local folder_name; folder_name="$(encode_path "$project_path")"
@@ -456,29 +353,25 @@ try:
     if not entries:
         sys.exit(0)
     entries.sort(key=lambda e: int(e.get('fileMtime', 0)), reverse=True)
-    entries = entries[:max_count]
-    for e in entries:
+    for e in entries[:max_count]:
         sid = e.get('sessionId') or e.get('id', '')
         if not sid: continue
         mtime = int(e.get('fileMtime', 0))
         summary = e.get('summary', '') or ''
         label = summary if summary else (get_label(folder_path, sid) or '(no prompt captured)')
-        # sanitize tabs in label
         label = label.replace('\t', ' ').replace('\n', ' ')[:200]
         print(f'{sid}\t{mtime}\t{label}')
-except Exception as ex:
+except Exception:
     pass
 PYEOF
         return
     fi
 
-    # Fallback: scan .jsonl files directly
     [[ -d "$folder_path" ]] || return
     python3 - "$folder_path" "$max_count" <<'PYEOF'
 import json, sys, os, glob
 
 folder_path, max_count = sys.argv[1], int(sys.argv[2])
-
 files = sorted(glob.glob(os.path.join(folder_path, '*.jsonl')),
                key=os.path.getmtime, reverse=True)[:max_count]
 
@@ -525,34 +418,24 @@ PYEOF
 
 format_age() {
     local mtime_ms="$1"
-    python3 - "$mtime_ms" <<'PYEOF'
-import sys, datetime
+    (( mtime_ms <= 0 )) && { printf '?'; return; }
 
-ms = int(sys.argv[1])
-if ms <= 0:
-    print('?', end=''); sys.exit()
+    local now_s mtime_s diff_s
+    now_s="$(date +%s)"
+    mtime_s=$(( mtime_ms / 1000 ))
+    diff_s=$(( now_s - mtime_s ))
 
-mod = datetime.datetime.fromtimestamp(ms / 1000)
-diff = datetime.datetime.now() - mod
-total_s = diff.total_seconds()
-
-if total_s < 3600:
-    print(f'{int(total_s/60)}m ago', end='')
-elif total_s < 86400:
-    print(f'{int(total_s/3600)}h ago', end='')
-elif total_s < 86400*30:
-    print(f'{int(total_s/86400)}d ago', end='')
-else:
-    print(mod.strftime('%Y-%m-%d'), end='')
-PYEOF
+    if   (( diff_s <  3600  )); then printf '%dm ago' $(( diff_s / 60 ))
+    elif (( diff_s <  86400 )); then printf '%dh ago' $(( diff_s / 3600 ))
+    elif (( diff_s < 2592000 )); then printf '%dd ago' $(( diff_s / 86400 ))
+    else date -r "$mtime_s" +%Y-%m-%d
+    fi
 }
 
 truncate_str() {
     local s="$1" max="${2:-55}"
-    if (( ${#s} > max )); then
-        printf '%s...' "${s:0:$((max-3))}"
-    else
-        printf '%s' "$s"
+    if (( ${#s} > max )); then printf '%s...' "${s:0:$((max-3))}"
+    else printf '%s' "$s"
     fi
 }
 
@@ -560,19 +443,18 @@ truncate_str() {
 # Banner & UI
 # ---------------------------------------------------------------------------
 write_banner() {
-    local inner=44
     local title="  MISSION CENTRE  "
-    printf "${c_cyan}╔$(printf '═%.0s' $(seq 1 $inner))╗${c_reset}\n"
-    local pad_total=$(( inner - ${#title} ))
+    local pad_total=$(( 44 - ${#title} ))
     local pad_l=$(( pad_total / 2 ))
     local pad_r=$(( pad_total - pad_l ))
+    printf "${c_cyan}╔%s╗${c_reset}\n" "$_BANNER_H"
     printf "${c_cyan}║%*s%s%*s║${c_reset}\n" $pad_l "" "$title" $pad_r ""
-    printf "${c_cyan}╚$(printf '═%.0s' $(seq 1 $inner))╝${c_reset}\n"
+    printf "${c_cyan}╚%s╝${c_reset}\n" "$_BANNER_H"
     echo ""
 }
 
 write_divider() {
-    printf "${c_dark_gray}$(printf '─%.0s' $(seq 1 46))${c_reset}\n"
+    printf "${c_dark_gray}%s${c_reset}\n" "$_DIV_H"
 }
 
 # ---------------------------------------------------------------------------
@@ -594,7 +476,6 @@ show_project_menu() {
     write_divider
     echo ""
 
-    # Recent meta sessions from scan root
     local meta_sessions=()
     while IFS= read -r line; do
         [[ -n "$line" ]] && meta_sessions+=("$line")
@@ -682,11 +563,10 @@ assert_cmd() {
     fi
 }
 
-# Open a new Terminal window running a command in the given directory.
-# Handles paths with spaces via AppleScript quoting.
+# Opens a new Terminal window running cmd in dir.
+# macOS Terminal automation requires permission on first use (System Settings → Privacy → Automation).
 _open_terminal() {
     local dir="$1" cmd="$2"
-    # Escape single quotes for AppleScript string embedding
     local safe_dir="${dir//\'/\'\\\'\'}"
     local safe_cmd="${cmd//\'/\'\\\'\'}"
     osascript -e "tell application \"Terminal\" to do script \"cd '$safe_dir' && $safe_cmd\"" &>/dev/null
@@ -695,7 +575,7 @@ _open_terminal() {
 launch_with_profile() {
     local path="$1" profile="$2"
     assert_dir "$path" || return
-    assert_cmd "jig" || return
+    assert_cmd "jig"   || return
     cecho "$c_green" "  Launching jig run $profile in $path ..."
     _open_terminal "$path" "jig run $profile"
 }
@@ -703,14 +583,14 @@ launch_with_profile() {
 launch_jig() {
     local path="$1"
     assert_dir "$path" || return
-    assert_cmd "jig" || return
+    assert_cmd "jig"   || return
     cecho "$c_green" "  Launching Jig in $path ..."
     _open_terminal "$path" "jig"
 }
 
 launch_resume() {
     local path="$1" session_id="$2"
-    assert_dir "$path" || return
+    assert_dir "$path"  || return
     assert_cmd "claude" || return
     cecho "$c_green" "  Resuming session $session_id ..."
     _open_terminal "$path" "claude --resume $session_id"
@@ -787,15 +667,12 @@ main() {
                     local action; action="$(show_launch_menu "$idx")"
 
                     if [[ "$action" == "L" ]]; then
-                        local prof="${PROJ_PROFILES[$idx]:-standard}"
-                        launch_with_profile "${PROJ_PATHS[$idx]}" "$prof"
-                        sleep 1
-                        in_project=false
+                        launch_with_profile "${PROJ_PATHS[$idx]}" "${PROJ_PROFILES[$idx]:-standard}"
+                        sleep 1; in_project=false
 
                     elif [[ "$action" == "J" ]]; then
                         launch_jig "${PROJ_PATHS[$idx]}"
-                        sleep 1
-                        in_project=false
+                        sleep 1; in_project=false
 
                     elif [[ "$action" =~ ^R([0-9]+)$ ]]; then
                         local ri=$(( ${BASH_REMATCH[1]} - 1 ))
@@ -806,8 +683,7 @@ main() {
                         if (( ri >= 0 && ri < ${#sessions[@]} )); then
                             IFS=$'\t' read -r sid _ _ <<< "${sessions[$ri]}"
                             launch_resume "${PROJ_PATHS[$idx]}" "$sid"
-                            sleep 1
-                            in_project=false
+                            sleep 1; in_project=false
                         else
                             cecho "$c_red" "  Invalid session number."
                             sleep 1
