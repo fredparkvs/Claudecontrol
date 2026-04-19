@@ -1,0 +1,3 @@
+# User-specific config and project registry — do not commit
+config.json
+projects.json
