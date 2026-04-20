@@ -248,6 +248,29 @@ config_has_path() {
 sync_new_projects() {
     cecho "$c_dark_gray" "Scanning $SCAN_ROOT for projects ..."
 
+    # Remove entries whose folders no longer exist
+    local i pruned=0
+    local keep_paths=() keep_names=() keep_descs=() keep_profiles=()
+    for (( i=0; i<${#PROJ_PATHS[@]}; i++ )); do
+        if [[ -d "${PROJ_PATHS[$i]}" ]]; then
+            keep_paths+=("${PROJ_PATHS[$i]}")
+            keep_names+=("${PROJ_NAMES[$i]}")
+            keep_descs+=("${PROJ_DESCS[$i]}")
+            keep_profiles+=("${PROJ_PROFILES[$i]}")
+        else
+            cecho "$c_red" "  Removed (folder gone): ${PROJ_NAMES[$i]} (${PROJ_PATHS[$i]})"
+            (( pruned++ )) || true
+        fi
+    done
+    if (( pruned > 0 )); then
+        PROJ_PATHS=("${keep_paths[@]+"${keep_paths[@]}"}")
+        PROJ_NAMES=("${keep_names[@]+"${keep_names[@]}"}")
+        PROJ_DESCS=("${keep_descs[@]+"${keep_descs[@]}"}")
+        PROJ_PROFILES=("${keep_profiles[@]+"${keep_profiles[@]}"}")
+        save_config
+        cecho "$c_yellow" "  Removed $pruned stale project(s) from registry."
+    fi
+
     local discovered=()
     while IFS= read -r p; do discovered+=("$p"); done < <(find_project_dirs "$SCAN_ROOT" 0)
 
@@ -258,7 +281,7 @@ sync_new_projects() {
     done
 
     if [[ ${#new_paths[@]} -eq 0 ]]; then
-        cecho "$c_dark_gray" "No new projects found."
+        (( pruned == 0 )) && cecho "$c_dark_gray" "No new projects found."
         return
     fi
 
@@ -266,17 +289,18 @@ sync_new_projects() {
     cecho "$c_yellow" "Found ${#new_paths[@]} new project(s) not yet in config."
     write_divider
 
+    local available_profiles; available_profiles="$(list_jig_profiles)"
     local name desc prof
     for p in "${new_paths[@]}"; do
         local default_name="${p##*/}"
         echo ""
         cnecho "$c_cyan" "  New project: "; echo "$p"
-        printf "  Name        [%s]: " "$default_name"; read -r name
+        printf "  Name        [%s]: " "$default_name"; read -r name || true
         [[ -z "$name" ]] && name="$default_name"
-        printf "  Description (one line, or Enter to skip): "; read -r desc
+        printf "  Description (one line, or Enter to skip): "; read -r desc || true
         [[ -z "$desc" ]] && desc="- no description yet -"
-        cecho "$c_dark_cyan" "  Profiles: corporate, vibe, build, maintain, review, standard"
-        printf "  Profile     [standard]: "; read -r prof
+        printf "  Profiles: ${c_dark_cyan}%s${c_reset}\n" "$available_profiles"
+        printf "  Profile     [standard]: "; read -r prof || true
         [[ -z "$prof" ]] && prof="standard"
 
         PROJ_PATHS+=("$p")
@@ -547,6 +571,7 @@ show_launch_menu() {
     fi
     [[ ${#sessions[@]} -gt 0 ]] && \
         printf "  ${c_green}[R#]${c_reset} Resume mission        - resume a session listed above\n"
+    printf "  ${c_yellow}[N]${c_reset}  Rename project        - currently \"%s\"\n" "$name"
     printf "  ${c_yellow}[P]${c_reset}  Change profile        - currently [%s]\n" "$profile"
     if [[ ! -f "$path/CLAUDE.md" ]]; then
         printf "  ${c_yellow}[I]${c_reset}  Init CLAUDE.md        - generate starter file with /init\n"
@@ -692,7 +717,12 @@ _open_terminal() {
     local dir="$1" cmd="$2"
     local safe_dir="${dir//\'/\'\\\'\'}"
     local safe_cmd="${cmd//\'/\'\\\'\'}"
-    osascript -e "tell application \"Terminal\" to do script \"cd '$safe_dir' && $safe_cmd\"" &>/dev/null
+    osascript &>/dev/null <<APPLESCRIPT
+tell application "Terminal"
+    activate
+    do script "cd '$safe_dir' && $safe_cmd"
+end tell
+APPLESCRIPT
 }
 
 _build_claude_cmd_from_profile() {
@@ -758,8 +788,8 @@ launch_resume() {
 
 launch_meta_mission() {
     assert_cmd "jig" || return
-    cecho "$c_magenta" "  Launching Meta Mission with build profile ..."
-    _open_terminal "$SCAN_ROOT" "jig run build"
+    cecho "$c_magenta" "  Launching Meta Mission with planning profile ..."
+    _open_terminal "$SCAN_ROOT" "jig run planning"
 }
 
 open_finder() {
@@ -848,6 +878,16 @@ main() {
                             sleep 1; in_project=false
                         else
                             cecho "$c_red" "  Invalid session number."
+                            sleep 1
+                        fi
+
+                    elif [[ "$action" == "N" ]]; then
+                        printf "\n  New name [%s]: " "${PROJ_NAMES[$idx]}"
+                        read -r new_name || true
+                        if [[ -n "$new_name" ]]; then
+                            PROJ_NAMES[$idx]="$new_name"
+                            save_config
+                            cecho "$c_green" "  Renamed to \"$new_name\""
                             sleep 1
                         fi
 
