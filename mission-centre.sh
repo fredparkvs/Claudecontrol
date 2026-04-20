@@ -685,7 +685,7 @@ PYEOF
 
 list_jig_profiles() {
     if command -v jig &>/dev/null; then
-        jig profiles list 2>/dev/null | awk '{print $1}' | grep -v '^$' | tr '\n' ' '
+        jig profiles list 2>/dev/null | awk '{print $1}' | grep -v '^$' | grep -v '^base$' | tr '\n' ' '
     else
         ls "$SCRIPT_DIR/profiles/"*.json 2>/dev/null | xargs -I{} basename {} .json | tr '\n' ' '
     fi
