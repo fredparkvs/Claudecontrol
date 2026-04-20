@@ -157,8 +157,6 @@ find_project_dirs() {
 
     local leaf="${path##*/}"
     should_skip_dir "$leaf" && return
-    [[ "$path" == "$SCRIPT_DIR" ]] && return
-
     if dir_has_definitive_marker "$path"; then
         echo "$path"; return
     fi
