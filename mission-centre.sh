@@ -931,19 +931,67 @@ main() {
                         echo ""
                         cecho "$c_cyan" "  Detected languages: $langs"
                         echo ""
-                        cecho "$c_dark_gray" "  Suggested plugins to install via /plugin in a claude session:"
+                        # Map languages to official marketplace plugin names
+                        local suggested_plugins=()
                         for lang in $langs; do
                             case "$lang" in
-                                typescript|javascript) printf "   • TypeScript/JS code intelligence plugin\n" ;;
-                                python)  printf "   • Python code intelligence plugin\n" ;;
-                                go)      printf "   • Go code intelligence plugin\n" ;;
-                                rust)    printf "   • Rust code intelligence plugin\n" ;;
-                                java)    printf "   • Java code intelligence plugin\n" ;;
+                                typescript|javascript) suggested_plugins+=("typescript-lsp") ;;
+                                python)  suggested_plugins+=("pyright-lsp") ;;
+                                go)      suggested_plugins+=("gopls-lsp") ;;
+                                rust)    suggested_plugins+=("rust-analyzer-lsp") ;;
+                                java)    suggested_plugins+=("jdtls-lsp") ;;
+                                kotlin)  suggested_plugins+=("kotlin-lsp") ;;
+                                ruby)    suggested_plugins+=("ruby-lsp") ;;
+                                php)     suggested_plugins+=("php-lsp") ;;
+                                swift)   suggested_plugins+=("swift-lsp") ;;
+                                lua)     suggested_plugins+=("lua-lsp") ;;
+                                c|cpp)   suggested_plugins+=("clangd-lsp") ;;
+                                csharp)  suggested_plugins+=("csharp-lsp") ;;
                             esac
                         done
-                        echo ""
-                        cecho "$c_dark_gray" "  Run /plugin in any claude session to browse the marketplace."
-                        printf "  Press Enter to continue"; read -r _ || true
+                        # Always suggest pr-review-toolkit if not already listed
+                        suggested_plugins+=("pr-review-toolkit")
+
+                        if [[ ${#suggested_plugins[@]} -eq 0 ]]; then
+                            cecho "$c_dark_gray" "  No language-specific plugins detected."
+                            printf "  Press Enter to continue"; read -r _ || true
+                        else
+                            # Get installed plugin names
+                            local installed; installed="$(claude plugin list 2>/dev/null | grep '❯' | awk '{print $2}' | cut -d@ -f1 | tr '\n' ' ')" || installed=""
+                            cecho "$c_dark_gray" "  Suggested plugins:"
+                            local to_install=()
+                            for p in "${suggested_plugins[@]}"; do
+                                # Deduplicate
+                                local already_listed=false
+                                for q in "${to_install[@]:-}"; do [[ "$q" == "$p" ]] && already_listed=true && break; done
+                                $already_listed && continue
+                                if echo "$installed" | grep -qw "$p"; then
+                                    printf "   ${c_green}✔ %s${c_reset} (installed)\n" "$p"
+                                else
+                                    printf "   ${c_yellow}○ %s${c_reset}\n" "$p"
+                                    to_install+=("$p")
+                                fi
+                            done
+                            echo ""
+                            if [[ ${#to_install[@]} -gt 0 ]]; then
+                                printf "  Install %d missing plugin(s)? [Y/n] " "${#to_install[@]}"
+                                read -r confirm || confirm="y"
+                                confirm="${confirm:-y}"
+                                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                                    for p in "${to_install[@]}"; do
+                                        printf "  Installing %s... " "$p"
+                                        if claude plugin install "$p" 2>&1 | grep -qi "success\|installed\|already"; then
+                                            printf "${c_green}done${c_reset}\n"
+                                        else
+                                            claude plugin install "$p" &>/dev/null && printf "${c_green}done${c_reset}\n" || printf "${c_red}failed${c_reset}\n"
+                                        fi
+                                    done
+                                fi
+                            else
+                                cecho "$c_green" "  All suggested plugins already installed."
+                            fi
+                            printf "  Press Enter to continue"; read -r _ || true
+                        fi
 
                     elif [[ "$action" == "E" ]]; then
                         open_finder "${PROJ_PATHS[$idx]}"
