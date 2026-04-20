@@ -1,0 +1,7 @@
+{
+  "description": "General-purpose session — all tools, default permissions",
+  "model": "sonnet",
+  "allowedTools": [],
+  "disallowedTools": [],
+  "permissionMode": "default"
+}

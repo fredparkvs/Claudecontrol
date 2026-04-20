@@ -184,10 +184,11 @@ PROJ_PATHS=()
 PROJ_NAMES=()
 PROJ_DESCS=()
 PROJ_PROFILES=()
+_MENU_RESULT=""
 
 load_config() {
     PROJ_PATHS=(); PROJ_NAMES=(); PROJ_DESCS=(); PROJ_PROFILES=()
-    [[ -f "$CONFIG_PATH" ]] || return
+    [[ -f "$CONFIG_PATH" ]] || return 0
 
     local line fields path name desc profile
     while IFS= read -r line; do
@@ -499,8 +500,8 @@ show_project_menu() {
         printf "  ${c_magenta}[M#]${c_reset}  Resume a meta mission listed above\n"
     echo ""
     printf "  Pick a project number, [M] Meta Mission, [S] Scan, or [Q] Quit: "
-    read -r choice
-    printf '%s' "${choice:-}"
+    read -r choice || true
+    _MENU_RESULT="${choice:-}"
 }
 
 show_launch_menu() {
@@ -511,7 +512,8 @@ show_launch_menu() {
 
     echo ""
     printf "  ${c_dark_gray}Project : ${c_reset}${c_cyan}%s${c_reset}  ${c_dark_cyan}[%s]${c_reset}\n" "$name" "$profile"
-    printf "  ${c_dark_gray}Path    : %s${c_reset}\n\n" "$path"
+    printf "  ${c_dark_gray}Path    : %s${c_reset}\n" "$path"
+    printf "  ${c_dark_gray}CLAUDE.md: ${c_reset}%b\n\n" "$(claudemd_status "$path")"
 
     local sessions=()
     while IFS= read -r line; do
@@ -531,17 +533,138 @@ show_launch_menu() {
         echo ""
     fi
 
-    printf "  ${c_green}[L]${c_reset}  Launch                - jig run %s (project default)\n" "$profile"
-    printf "  ${c_yellow}[J]${c_reset}  Launch with Jig       - pick a different profile\n"
+    local profile_desc=""
+    local pf="$SCRIPT_DIR/profiles/${profile}.json"
+    [[ -f "$pf" ]] && profile_desc="$(jq -r '.description // empty' "$pf" 2>/dev/null)"
+
+    if command -v jig &>/dev/null; then
+        printf "  ${c_green}[L]${c_reset}  Launch                - jig run %s (project default)\n" "$profile"
+        printf "  ${c_yellow}[J]${c_reset}  Launch with Jig       - pick a different profile\n"
+    elif [[ -n "$profile_desc" ]]; then
+        printf "  ${c_green}[L]${c_reset}  Launch [%s]           - %s\n" "$profile" "$profile_desc"
+    else
+        printf "  ${c_green}[L]${c_reset}  Launch                - open claude in project folder\n"
+    fi
     [[ ${#sessions[@]} -gt 0 ]] && \
         printf "  ${c_green}[R#]${c_reset} Resume mission        - resume a session listed above\n"
+    printf "  ${c_yellow}[P]${c_reset}  Change profile        - currently [%s]\n" "$profile"
+    if [[ ! -f "$path/CLAUDE.md" ]]; then
+        printf "  ${c_yellow}[I]${c_reset}  Init CLAUDE.md        - generate starter file with /init\n"
+    else
+        printf "  ${c_dark_gray}[I]${c_reset}  Reinit CLAUDE.md      - regenerate with /init\n"
+    fi
+    if hook_installed "$path"; then
+        printf "  ${c_dark_gray}[H]${c_reset}  Test hook             - already installed\n"
+    else
+        printf "  ${c_yellow}[H]${c_reset}  Install test hook     - filter test output to errors only\n"
+    fi
+    local langs; langs="$(detect_languages "$path")"
+    [[ -n "$langs" ]] && printf "  ${c_cyan}[K]${c_reset}  Plugin suggestions    - detected: %s\n" "$langs"
     printf "  ${c_cyan}[E]${c_reset}  Open in Finder\n"
     printf "  ${c_dark_gray}[B]${c_reset}  Back\n"
     echo ""
     write_divider
     printf "  Choose: "
-    read -r choice
-    printf '%s' "${choice:-}" | tr '[:lower:]' '[:upper:]'
+    read -r choice || true
+    _MENU_RESULT="$(printf '%s' "${choice:-}" | tr '[:lower:]' '[:upper:]')"
+}
+
+# ---------------------------------------------------------------------------
+# Project health helpers
+# ---------------------------------------------------------------------------
+
+claudemd_status() {
+    local path="$1"
+    local f="$path/CLAUDE.md"
+    if [[ ! -f "$f" ]]; then
+        printf "${c_red}missing${c_reset}"
+        return
+    fi
+    local lines; lines="$(wc -l < "$f" | tr -d ' ')"
+    if (( lines > 200 )); then
+        printf "${c_red}%d lines ⚠ over limit${c_reset}" "$lines"
+    elif (( lines > 150 )); then
+        printf "${c_yellow}%d lines${c_reset}" "$lines"
+    else
+        printf "${c_green}%d lines${c_reset}" "$lines"
+    fi
+}
+
+detect_languages() {
+    local path="$1"
+    local langs=()
+    [[ -f "$path/tsconfig.json" ]]                                            && langs+=("typescript")
+    [[ -f "$path/package.json" && ! -f "$path/tsconfig.json" ]]               && langs+=("javascript")
+    [[ -f "$path/requirements.txt" || -f "$path/pyproject.toml" || -f "$path/setup.py" ]] && langs+=("python")
+    [[ -f "$path/go.mod" ]]    && langs+=("go")
+    [[ -f "$path/Cargo.toml" ]] && langs+=("rust")
+    [[ -f "$path/pom.xml" || -f "$path/build.gradle" ]] && langs+=("java")
+    printf '%s ' "${langs[@]+"${langs[@]}"}"
+}
+
+hook_installed() {
+    local path="$1"
+    local settings="$path/.claude/settings.json"
+    [[ -f "$settings" ]] && grep -q "filter-test-output" "$settings" 2>/dev/null
+}
+
+install_test_hook() {
+    local path="$1"
+    local hooks_dir="$HOME/.claude/hooks"
+    local hook_script="$hooks_dir/filter-test-output.sh"
+    local settings_dir="$path/.claude"
+    local settings_file="$settings_dir/settings.json"
+
+    mkdir -p "$hooks_dir" "$settings_dir"
+
+    cat > "$hook_script" << 'HOOKEOF'
+#!/bin/bash
+input=$(cat)
+cmd=$(printf '%s' "$input" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('command',''))" 2>/dev/null)
+
+if [[ "$cmd" =~ ^(npm[[:space:]]test|npm[[:space:]]run[[:space:]]test|pytest|go[[:space:]]test|jest|vitest|mocha) ]]; then
+  filtered_cmd="$cmd 2>&1 | grep -A 5 -E '(FAIL|ERROR|error:|FAILED|✕)' | head -100"
+  python3 -c "
+import json, sys
+print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'allow','updatedInput':{'command':'$filtered_cmd'}}}))"
+else
+  echo "{}"
+fi
+HOOKEOF
+    chmod +x "$hook_script"
+
+    # Merge hook into settings.json using python3
+    python3 - "$settings_file" "$hook_script" << 'PYEOF'
+import json, sys, os
+
+settings_file, hook_script = sys.argv[1], sys.argv[2]
+
+try:
+    with open(settings_file) as f:
+        settings = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    settings = {}
+
+hooks = settings.setdefault("hooks", {})
+pre = hooks.setdefault("PreToolUse", [])
+
+entry = {"matcher": "Bash", "hooks": [{"type": "command", "command": hook_script}]}
+if not any(h.get("hooks", [{}])[0].get("command","").endswith("filter-test-output.sh") for h in pre):
+    pre.append(entry)
+
+with open(settings_file, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+print("ok")
+PYEOF
+}
+
+list_jig_profiles() {
+    if command -v jig &>/dev/null; then
+        jig profiles list 2>/dev/null | awk '{print $1}' | grep -v '^$' | tr '\n' ' '
+    else
+        ls "$SCRIPT_DIR/profiles/"*.json 2>/dev/null | xargs -I{} basename {} .json | tr '\n' ' '
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -572,12 +695,41 @@ _open_terminal() {
     osascript -e "tell application \"Terminal\" to do script \"cd '$safe_dir' && $safe_cmd\"" &>/dev/null
 }
 
+_build_claude_cmd_from_profile() {
+    local profile="$1"
+    local profile_file="$SCRIPT_DIR/profiles/${profile}.json"
+    local cmd="claude"
+
+    if [[ ! -f "$profile_file" ]]; then
+        printf '%s' "$cmd"
+        return
+    fi
+
+    local model perm allowed disallowed
+    model="$(jq -r '.model // empty' "$profile_file" 2>/dev/null)"
+    perm="$(jq -r '.permissionMode // empty' "$profile_file" 2>/dev/null)"
+    allowed="$(jq -r '.allowedTools // [] | map(.) | join(",")' "$profile_file" 2>/dev/null)"
+    disallowed="$(jq -r '.disallowedTools // [] | map(.) | join(",")' "$profile_file" 2>/dev/null)"
+
+    [[ -n "$model" ]]      && cmd+=" --model $model"
+    [[ "$perm" != "default" && -n "$perm" ]] && cmd+=" --permission-mode $perm"
+    [[ -n "$allowed" ]]    && cmd+=" --allowedTools $allowed"
+    [[ -n "$disallowed" ]] && cmd+=" --disallowedTools $disallowed"
+
+    printf '%s' "$cmd"
+}
+
 launch_with_profile() {
     local path="$1" profile="$2"
     assert_dir "$path" || return
-    assert_cmd "jig"   || return
-    cecho "$c_green" "  Launching jig run $profile in $path ..."
-    _open_terminal "$path" "jig run $profile"
+    if command -v jig &>/dev/null; then
+        cecho "$c_green" "  Launching jig run $profile in $path ..."
+        _open_terminal "$path" "jig run $profile"
+    else
+        local cmd; cmd="$(_build_claude_cmd_from_profile "$profile")"
+        cecho "$c_green" "  Launching: $cmd"
+        _open_terminal "$path" "$cmd"
+    fi
 }
 
 launch_jig() {
@@ -586,6 +738,14 @@ launch_jig() {
     assert_cmd "jig"   || return
     cecho "$c_green" "  Launching Jig in $path ..."
     _open_terminal "$path" "jig"
+}
+
+launch_claude() {
+    local path="$1"
+    assert_dir "$path"  || return
+    assert_cmd "claude" || return
+    cecho "$c_green" "  Launching claude in $path ..."
+    _open_terminal "$path" "claude"
 }
 
 launch_resume() {
@@ -617,11 +777,12 @@ main() {
     load_config
 
     local running=true
+    _MENU_RESULT=""
 
     while $running; do
         clear
-        local raw; raw="$(show_project_menu)"
-        local raw_up; raw_up="$(printf '%s' "$raw" | tr '[:lower:]' '[:upper:]')"
+        show_project_menu
+        local raw_up; raw_up="$(printf '%s' "$_MENU_RESULT" | tr '[:lower:]' '[:upper:]')"
 
         if [[ "$raw_up" == "Q" ]]; then
             echo ""
@@ -654,8 +815,8 @@ main() {
             load_config
             printf "  Press Enter to continue"; read -r _
 
-        elif [[ "$raw" =~ ^[0-9]+$ ]]; then
-            local idx=$(( raw - 1 ))
+        elif [[ "$_MENU_RESULT" =~ ^[0-9]+$ ]]; then
+            local idx=$(( _MENU_RESULT - 1 ))
             if (( idx < 0 || idx >= ${#PROJ_PATHS[@]} )); then
                 cecho "$c_red" "  Invalid number."
                 sleep 1
@@ -664,7 +825,8 @@ main() {
                 while $in_project; do
                     clear
                     write_banner
-                    local action; action="$(show_launch_menu "$idx")"
+                    show_launch_menu "$idx"
+                    local action="$_MENU_RESULT"
 
                     if [[ "$action" == "L" ]]; then
                         launch_with_profile "${PROJ_PATHS[$idx]}" "${PROJ_PROFILES[$idx]:-standard}"
@@ -688,6 +850,61 @@ main() {
                             cecho "$c_red" "  Invalid session number."
                             sleep 1
                         fi
+
+                    elif [[ "$action" == "P" ]]; then
+                        local available_profiles
+                        available_profiles="$(list_jig_profiles)"
+                        printf "\n  Available profiles: ${c_dark_cyan}%s${c_reset}\n" "$available_profiles"
+                        printf "  New profile [%s]: " "${PROJ_PROFILES[$idx]:-standard}"
+                        read -r new_profile || true
+                        new_profile="${new_profile:-${PROJ_PROFILES[$idx]:-standard}}"
+                        if [[ -n "$new_profile" ]]; then
+                            PROJ_PROFILES[$idx]="$new_profile"
+                            save_config
+                            cecho "$c_green" "  Profile updated to [$new_profile]"
+                            sleep 1
+                        fi
+
+                    elif [[ "$action" == "I" ]]; then
+                        assert_cmd "claude" || { sleep 1; continue; }
+                        cecho "$c_green" "  Opening claude to run /init in ${PROJ_PATHS[$idx]} ..."
+                        cecho "$c_dark_gray" "  Type /init in the session to generate CLAUDE.md, then exit."
+                        sleep 1
+                        _open_terminal "${PROJ_PATHS[$idx]}" "claude"
+                        sleep 1
+
+                    elif [[ "$action" == "H" ]]; then
+                        if hook_installed "${PROJ_PATHS[$idx]}"; then
+                            cecho "$c_yellow" "  Test hook already installed."
+                        else
+                            cecho "$c_green" "  Installing test output filter hook..."
+                            if install_test_hook "${PROJ_PATHS[$idx]}"; then
+                                cecho "$c_green" "  Hook installed: ~/.claude/hooks/filter-test-output.sh"
+                                cecho "$c_green" "  Wired into ${PROJ_PATHS[$idx]}/.claude/settings.json"
+                            else
+                                cecho "$c_red" "  Hook installation failed."
+                            fi
+                        fi
+                        sleep 2
+
+                    elif [[ "$action" == "K" ]]; then
+                        local langs; langs="$(detect_languages "${PROJ_PATHS[$idx]}")"
+                        echo ""
+                        cecho "$c_cyan" "  Detected languages: $langs"
+                        echo ""
+                        cecho "$c_dark_gray" "  Suggested plugins to install via /plugin in a claude session:"
+                        for lang in $langs; do
+                            case "$lang" in
+                                typescript|javascript) printf "   • TypeScript/JS code intelligence plugin\n" ;;
+                                python)  printf "   • Python code intelligence plugin\n" ;;
+                                go)      printf "   • Go code intelligence plugin\n" ;;
+                                rust)    printf "   • Rust code intelligence plugin\n" ;;
+                                java)    printf "   • Java code intelligence plugin\n" ;;
+                            esac
+                        done
+                        echo ""
+                        cecho "$c_dark_gray" "  Run /plugin in any claude session to browse the marketplace."
+                        printf "  Press Enter to continue"; read -r _ || true
 
                     elif [[ "$action" == "E" ]]; then
                         open_finder "${PROJ_PATHS[$idx]}"

@@ -1,0 +1,7 @@
+{
+  "description": "Client / work projects — opus model, all tools, default permissions",
+  "model": "opus",
+  "allowedTools": [],
+  "disallowedTools": [],
+  "permissionMode": "default"
+}

@@ -1,0 +1,7 @@
+{
+  "description": "Bug fixes and maintenance — edit tools, no broad web access",
+  "model": "sonnet",
+  "allowedTools": ["Bash", "Edit", "Write", "Read", "Glob", "Grep"],
+  "disallowedTools": [],
+  "permissionMode": "default"
+}

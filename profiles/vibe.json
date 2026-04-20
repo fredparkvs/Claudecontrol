@@ -1,0 +1,7 @@
+{
+  "description": "Personal / experimental — fast model, auto-accept everything",
+  "model": "haiku",
+  "allowedTools": [],
+  "disallowedTools": [],
+  "permissionMode": "acceptEdits"
+}

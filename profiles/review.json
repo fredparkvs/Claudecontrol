@@ -1,0 +1,7 @@
+{
+  "description": "Code review — read-only tools, plan mode (no writes without approval)",
+  "model": "sonnet",
+  "allowedTools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch"],
+  "disallowedTools": [],
+  "permissionMode": "plan"
+}
